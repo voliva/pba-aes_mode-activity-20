@@ -11,10 +11,13 @@
 //! it is not secure and make the point that the most straight-forward approach isn't always the
 //! best, and can sometimes be trivially broken.
 
+use std::iter::{zip, Cycle};
+
 use aes::{
     cipher::{generic_array::GenericArray, BlockCipher, BlockDecrypt, BlockEncrypt, KeyInit},
     Aes128,
 };
+use rand::Rng;
 
 ///We're using AES 128 which has 16-byte (128 bit) blocks.
 const BLOCK_SIZE: usize = 16;
@@ -65,7 +68,7 @@ fn aes_decrypt(data: [u8; BLOCK_SIZE], key: &[u8; BLOCK_SIZE]) -> [u8; BLOCK_SIZ
 /// But if the data _is_ a multiple of the block length, then we have a problem. We don't want
 /// to later look at the last byte and remove part of the data. Instead, in this case, we add
 /// another entire block containing the block length in each byte. In our case,
-/// [16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16]
+/// [10, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]
 fn pad(mut data: Vec<u8>) -> Vec<u8> {
     // When twe have a multiple the second term is 0
     let number_pad_bytes = BLOCK_SIZE - data.len() % BLOCK_SIZE;
@@ -75,6 +78,16 @@ fn pad(mut data: Vec<u8>) -> Vec<u8> {
     }
 
     data
+}
+
+/// Does the opposite of the pad function.
+fn un_pad(data: Vec<u8>) -> Vec<u8> {
+    let number_pad_bytes = data[data.len() - 1];
+
+    let data_len = data.len();
+    data.into_iter()
+        .take(data_len - number_pad_bytes as usize)
+        .collect()
 }
 
 /// Groups the data into BLOCK_SIZE blocks. Assumes the data is already
@@ -95,12 +108,7 @@ fn group(data: Vec<u8>) -> Vec<[u8; BLOCK_SIZE]> {
 
 /// Does the opposite of the group function
 fn un_group(blocks: Vec<[u8; BLOCK_SIZE]>) -> Vec<u8> {
-    todo!()
-}
-
-/// Does the opposite of the pad function.
-fn un_pad(data: Vec<u8>) -> Vec<u8> {
-    todo!()
+    blocks.into_iter().flatten().collect()
 }
 
 /// The first mode we will implement is the Electronic Code Book, or ECB mode.
@@ -111,12 +119,23 @@ fn un_pad(data: Vec<u8>) -> Vec<u8> {
 /// One good thing about this mode is that it is parallelizable. But to see why it is
 /// insecure look at: https://www.ubiqsecurity.com/wp-content/uploads/2022/02/ECB2.png
 fn ecb_encrypt(plain_text: Vec<u8>, key: [u8; 16]) -> Vec<u8> {
-    todo!()
+    let padded = pad(plain_text);
+    let grouped = group(padded);
+
+    let encrypted_groups: Vec<_> = grouped.into_iter().map(|v| aes_encrypt(v, &key)).collect();
+
+    un_group(encrypted_groups)
 }
 
 /// Opposite of ecb_encrypt.
 fn ecb_decrypt(cipher_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
-    todo!()
+    let encrypted_groups = group(cipher_text);
+
+    let grouped: Vec<_> = encrypted_groups
+        .into_iter()
+        .map(|v| aes_decrypt(v, &key))
+        .collect();
+    un_pad(un_group(grouped))
 }
 
 /// The next mode, which you can implement on your own is cipherblock chaining.
@@ -132,13 +151,47 @@ fn ecb_decrypt(cipher_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
 /// very first block because it doesn't have a previous block. Typically this IV
 /// is inserted as the first block of ciphertext.
 fn cbc_encrypt(plain_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
-    // Remember to generate a random initialization vector for the first block.
+    let mut iv: [u8; BLOCK_SIZE] = [0u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        iv[i] = rand::thread_rng().gen_range(1..u8::MAX)
+    }
 
-    todo!()
+    let padded = pad(plain_text);
+    let grouped = group(padded);
+
+    let mut result = vec![iv.clone()];
+    for group in grouped {
+        let mut xored: [u8; BLOCK_SIZE] = [0u8; BLOCK_SIZE];
+        for i in 0..BLOCK_SIZE {
+            xored[i] = iv[i] ^ group[i];
+        }
+        let cipher_text = aes_encrypt(xored, &key);
+        result.push(cipher_text);
+
+        iv = cipher_text.clone();
+    }
+
+    un_group(result)
 }
 
 fn cbc_decrypt(cipher_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
-    todo!()
+    let encrypted_groups = group(cipher_text);
+
+    let mut blocks = vec![];
+    let mut iv = encrypted_groups[0];
+    for group in &encrypted_groups[1..] {
+        let mut decrypted = aes_decrypt(group.to_owned(), &key);
+        for i in 0..BLOCK_SIZE {
+            decrypted[i] = iv[i] ^ decrypted[i];
+        }
+
+        iv = group.to_owned();
+        blocks.push(decrypted);
+    }
+
+    println!("{:?}", blocks);
+
+    un_pad(un_group(blocks))
 }
 
 /// Another mode which you can implement on your own is counter mode.
@@ -164,4 +217,35 @@ fn ctr_encrypt(plain_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
 
 fn ctr_decrypt(cipher_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
     todo!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn padding() {
+        let a = vec![1, 2, 3];
+        assert_eq!(a.clone(), un_pad(pad(a)));
+        let b = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        assert_eq!(b.clone(), un_pad(pad(b)));
+    }
+
+    #[test]
+    fn grouping() {
+        let a = vec![0; BLOCK_SIZE * 2];
+        assert_eq!(a.clone(), un_group(group(a)));
+    }
+
+    #[test]
+    fn cbc() {
+        let a = vec![
+            0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x66, 0x72, 0x6F, 0x6D, 0x20, 0x61, 0x6E, 0x6F,
+            0x74, 0x68, 0x65, 0x72, 0x20, 0x77, 0x6F, 0x72, 0x6C, 0x64,
+        ];
+        assert_eq!(
+            a.clone(),
+            cbc_decrypt(cbc_encrypt(a, [1; BLOCK_SIZE]), [1; BLOCK_SIZE])
+        );
+    }
 }
