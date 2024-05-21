@@ -189,8 +189,6 @@ fn cbc_decrypt(cipher_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
         blocks.push(decrypted);
     }
 
-    println!("{:?}", blocks);
-
     un_pad(un_group(blocks))
 }
 
@@ -211,12 +209,52 @@ fn cbc_decrypt(cipher_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
 /// Once again, you will need to generate a random nonce which is 64 bits long. This should be
 /// inserted as the first block of the ciphertext.
 fn ctr_encrypt(plain_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
-    // Remember to generate a random nonce
-    todo!()
+    let mut nonce: [u8; BLOCK_SIZE] = [0u8; BLOCK_SIZE];
+    for i in 0..(BLOCK_SIZE / 2) {
+        nonce[i] = rand::thread_rng().gen_range(1..u8::MAX)
+    }
+    let mut counter: u64 = 0;
+
+    let padded = pad(plain_text);
+    let grouped = group(padded);
+
+    let mut result = vec![nonce.clone()];
+    for group in grouped {
+        nonce[BLOCK_SIZE / 2..].copy_from_slice(&counter.to_le_bytes());
+
+        let block_key = aes_encrypt(nonce, &key);
+        let mut xored: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+        for i in 0..BLOCK_SIZE {
+            xored[i] = block_key[i] ^ group[i];
+        }
+        result.push(xored);
+
+        counter += 1;
+    }
+
+    un_group(result)
 }
 
 fn ctr_decrypt(cipher_text: Vec<u8>, key: [u8; BLOCK_SIZE]) -> Vec<u8> {
-    todo!()
+    let encrypted_groups = group(cipher_text);
+    let mut counter: u64 = 0;
+
+    let mut result = vec![];
+    let mut nonce = encrypted_groups[0];
+    for group in &encrypted_groups[1..] {
+        nonce[BLOCK_SIZE / 2..].copy_from_slice(&counter.to_le_bytes());
+
+        let block_key = aes_encrypt(nonce, &key);
+        let mut xored: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+        for i in 0..BLOCK_SIZE {
+            xored[i] = block_key[i] ^ group[i];
+        }
+        result.push(xored);
+
+        counter += 1;
+    }
+
+    un_pad(un_group(result))
 }
 
 #[cfg(test)]
@@ -246,6 +284,18 @@ mod tests {
         assert_eq!(
             a.clone(),
             cbc_decrypt(cbc_encrypt(a, [1; BLOCK_SIZE]), [1; BLOCK_SIZE])
+        );
+    }
+
+    #[test]
+    fn ctr() {
+        let a = vec![
+            0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x66, 0x72, 0x6F, 0x6D, 0x20, 0x61, 0x6E, 0x6F,
+            0x74, 0x68, 0x65, 0x72, 0x20, 0x77, 0x6F, 0x72, 0x6C, 0x64,
+        ];
+        assert_eq!(
+            a.clone(),
+            ctr_decrypt(ctr_encrypt(a, [1; BLOCK_SIZE]), [1; BLOCK_SIZE])
         );
     }
 }
